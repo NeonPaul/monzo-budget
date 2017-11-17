@@ -5,6 +5,12 @@ try {
   require("./env.js");
 } catch (e) {}
 
+const category = ({ name, spent }) => `<div>
+  ${name}
+  <input name="${name}_budget" type="number" step="0.01">
+  <output name="${name}_spent">${spent}</output>
+  <output name="${name}_remaining"></output></div>`;
+
 const app = new Koa();
 
 const date = new Date();
@@ -15,7 +21,8 @@ const err = () => {
 
 const client_id = process.env.MONZO_CLIENT_ID || err();
 const client_secret = process.env.MONZO_CLIENT_SECRET || err();
-const redirect_uri = "http://localhost:3000";
+const port = process.env.PORT || 3000;
+const redirect_uri = process.env.APP_URL || "http://localhost:" + port;
 const state_token = "abdefg";
 const transactions = "https://api.monzo.com/transactions";
 
@@ -37,7 +44,11 @@ const exchangeToken = (code, ctx) => {
       })
         .then(r => r.json())
         .then(j => {
-          ctx.cookies.set("token", j.access_token);
+          const d = new Date();
+          d.setFullYear(d.getFullYear() + 1);
+          ctx.cookies.set("token", j.access_token, {
+            expires: d
+          });
           return j.access_token;
         });
 };
@@ -50,13 +61,12 @@ const getAccountId = accessToken =>
   })
     .then(r => r.json())
     .then(j => {
-      console.log(j);
       return j.accounts.filter(a => a.type === "uk_retail")[0].id;
     });
 
 app.use(ctx => {
   const code = ctx.query.code;
-  if (code) {
+  if (code || ctx.cookies.get("token")) {
     return exchangeToken(code, ctx)
       .then(accessToken => {
         return getAccountId(accessToken).then(id =>
@@ -68,16 +78,36 @@ app.use(ctx => {
         );
       })
       .then(r => r.json())
-      .then(
-        json =>
-          (ctx.body = JSON.stringify(
-            json.transactions.reduce((o, t) => {
-              const cat = (t.amount > 0 ? "+" : "-") + t.category;
-              o[cat] = (o[cat] || 0) + t.amount / 100;
-              return o;
-            }, {})
-          ))
-      );
+      .then(json => {
+        const transactions = json.transactions.reduce((o, t) => {
+          const cat = t.category;
+          if (t.amount < 0) {
+            o[cat] = (o[cat] || 0) - t.amount / 100;
+          }
+          return o;
+        }, {});
+        ctx.body =
+          Object.keys(transactions)
+            .map(k => category({ name: k, spent: transactions[k] }))
+            .join("") +
+          `
+            <script>
+            const inputs = document.querySelectorAll('input')
+            inputs.forEach(budget => {
+              const init = localStorage.getItem(budget.name) || 0
+              const spent = budget.nextElementSibling;
+              const left = spent.nextElementSibling;
+
+              const u = () => left.value = (Number(budget.value) - Number(spent.value)).toFixed(2);
+              u()
+              budget.addEventListener('change', e => {
+                u()
+                const init = localStorage.setItem(budget.name, Number(budget.value) || 0)
+              })
+            })
+            </script>
+          `;
+      });
   } else {
     ctx.body = `<a href="https://auth.getmondo.co.uk/?client_id=${
       client_id
@@ -91,4 +121,4 @@ app.on("error", err => {
   console.error("server error", err);
 });
 
-app.listen(3000);
+app.listen(port);
